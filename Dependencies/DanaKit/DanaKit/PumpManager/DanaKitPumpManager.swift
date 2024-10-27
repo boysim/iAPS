@@ -63,11 +63,16 @@ public class DanaKitPumpManager: DeviceManager {
     private let stateObservers = WeakSynchronizedSet<StateObserver>()
     private let scanDeviceObservers = WeakSynchronizedSet<StateObserver>()
     
+    private var isPriming = false
     private var doseReporter: DanaKitDoseProgressReporter?
     private var doseEntry: UnfinalizedDose?
     
     public var isOnboarded: Bool {
         self.state.isOnBoarded
+    }
+    
+    public var isBluetoothConnected: Bool {
+        self.bluetooth.isConnected
     }
     
     private let basalIntervals: [TimeInterval] = Array(0..<24).map({ TimeInterval(60 * 60 * $0) })
@@ -322,6 +327,10 @@ extension DanaKitPumpManager: PumpManager {
                 await self.syncUserOptions()
                 let events = await self.syncHistory()
                 
+                if self.shouldSyncTime() {
+                    await self.syncTime()
+                }
+                
                 let pumpTime = await self.fetchPumpTime()
                 if let pumpTime = pumpTime {
                     self.state.pumpTimeSyncedAt = Date.now
@@ -345,6 +354,31 @@ extension DanaKitPumpManager: PumpManager {
                 completion?(Date.now)
             }
         }
+    }
+    
+    private func syncTime() async {
+        return await withCheckedContinuation { continuation in
+            self.syncPumpTime { error in
+                if let error = error {
+                    self.log.error("Failed to automaticly sync pump time: \(error.localizedDescription)")
+                }
+                
+                continuation.resume()
+            }
+        }
+    }
+    
+    private func shouldSyncTime() -> Bool {
+        guard self.state.allowAutomaticTimeSync else {
+            return false
+        }
+        guard let pumpTime = self.state.pumpTime else {
+            return false
+        }
+        
+        let pumpTimeComp = Calendar.current.dateComponents([.day], from: pumpTime)
+        let nowComp = Calendar.current.dateComponents([.day], from: Date.now)
+        return pumpTimeComp.day != nowComp.day
     }
     
     private func syncUserOptions() async {
@@ -423,6 +457,11 @@ extension DanaKitPumpManager: PumpManager {
                     return NewPumpEvent(date: item.timestamp, dose: nil, raw: item.raw, title: "Alarm: \(getAlarmMessage(param8: item.alarm))", type: .alarm, alarmType: PumpAlarmType.fromParam8(item.alarm))
                 
                 case HistoryCode.RECORD_TYPE_BOLUS:
+                    // Skip bolus syncing if enabled by user
+                    if self.state.isBolusSyncDisabled {
+                        return nil
+                    }
+                        
                     // If we find a bolus here, we assume that is hasnt been synced to Loop
                     return NewPumpEvent.bolus(
                         dose: DoseEntry.bolus(units: item.value!, deliveredUnits: item.value!, duration: item.durationInMin! * 60, activationType: .manualNoRecommendation, insulinType: self.state.insulinType!, startDate: item.timestamp),
@@ -495,6 +534,12 @@ extension DanaKitPumpManager: PumpManager {
             return
         }
         
+        guard let insulinType = self.state.insulinType else {
+            self.log.error("Insulin type is nil...")
+            completion(.configuration(DanaKitPumpManagerError.unknown("Missing insulin type")))
+            return
+        }
+        
         delegateQueue.async {
             let duration = self.estimatedDuration(toBolus: units)
             self.log.info("Enact bolus, units: \(units)U, duration: \(duration)sec")
@@ -526,7 +571,7 @@ extension DanaKitPumpManager: PumpManager {
                     }
                     
                     do {
-                        let packet = generatePacketBolusStart(options: PacketBolusStart(amount: units, speed: self.state.bolusSpeed))
+                        let packet = generatePacketBolusStart(options: PacketBolusStart(amount: units, speed: !self.isPriming ? self.state.bolusSpeed : .speed12))
                         let result = try await self.bluetooth.writeMessage(packet)
                         
                         guard result.success else {
@@ -545,7 +590,7 @@ extension DanaKitPumpManager: PumpManager {
                         self.state.lastStatusPumpDateTime = (await self.fetchPumpTime()) ?? Date.now
                         self.state.lastStatusDate = Date.now
                         
-                        self.doseEntry = UnfinalizedDose(units: units, duration: duration, activationType: activationType, insulinType: self.state.insulinType!)
+                        self.doseEntry = UnfinalizedDose(units: units, duration: duration, activationType: activationType, insulinType: insulinType)
                         self.doseReporter = DanaKitDoseProgressReporter(total: units)
                         self.state.bolusState = .inProgress
                         self.notifyStateDidChange()
@@ -562,6 +607,19 @@ extension DanaKitPumpManager: PumpManager {
                     }
                 }
             }
+        }
+    }
+    
+    public func enactPrime(unit: Double, completion: @escaping (PumpManagerError?) -> Void) {
+        self.isPriming = true
+        self.enactBolus(units: unit, activationType: .manualNoRecommendation) { error in
+            if let error = error {
+                self.isPriming = false
+                completion(error)
+                return
+            }
+            
+            completion(nil)
         }
     }
     
@@ -1171,6 +1229,7 @@ extension DanaKitPumpManager: AlertSoundVendor {
 
 extension DanaKitPumpManager {
     public func acknowledgeAlert(alertIdentifier: LoopKit.Alert.AlertIdentifier, completion: @escaping (Error?) -> Void) {
+        completion(nil)
     }
 }
 
@@ -1248,6 +1307,8 @@ extension DanaKitPumpManager {
             return
         }
         
+        self.doseEntry = nil
+        self.doseReporter = nil
         self.state.bolusState = .noBolus
         self.state.lastStatusDate = Date.now
         self.notifyStateDidChange()
@@ -1290,7 +1351,8 @@ extension DanaKitPumpManager {
             self.doseEntry = nil
             self.doseReporter = nil
             
-            guard let dose = dose else {
+            // Dont store the prime bolus
+            guard let dose = dose, !self.isPriming else {
                 return
             }
             

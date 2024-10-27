@@ -66,6 +66,8 @@ public struct DanaKitPumpManagerState: RawRepresentable, Equatable {
         self.basalProfileNumber = rawValue["basalProfileNumber"] as? UInt8 ?? 0
         self.cannulaDate = rawValue["cannulaDate2"] as? Date
         self.reservoirDate = rawValue["reservoirDate"] as? Date
+        self.allowAutomaticTimeSync = rawValue["allowAutomaticTimeSync"] as? Bool ?? true
+        self.isBolusSyncDisabled = rawValue["isBolusSyncDisabled"] as? Bool ?? false
         
         if let bolusSpeedRaw = rawValue["bolusSpeed"] as? BolusSpeed.RawValue {
             bolusSpeed = BolusSpeed(rawValue: bolusSpeedRaw) ?? .speed12
@@ -134,6 +136,8 @@ public struct DanaKitPumpManagerState: RawRepresentable, Equatable {
         self.batteryRemaining = 0
         self.cannulaDate = nil
         self.isUsingContinuousMode = false
+        self.allowAutomaticTimeSync = true
+        self.isBolusSyncDisabled = false
     }
     
     public var rawValue: RawValue {
@@ -182,7 +186,9 @@ public struct DanaKitPumpManagerState: RawRepresentable, Equatable {
         value["cannulaDate2"] = self.cannulaDate // Migration to new value
         value["reservoirDate"] = self.reservoirDate
         value["isUsingContinuousMode"] = self.isUsingContinuousMode
-        
+        value["allowAutomaticTimeSync"] = self.allowAutomaticTimeSync
+        value["isBolusSyncDisabled"] = self.isBolusSyncDisabled
+
         return value
     }
     
@@ -191,7 +197,6 @@ public struct DanaKitPumpManagerState: RawRepresentable, Equatable {
     public var lastStatusPumpDateTime: Date
     
     public var isOnBoarded = false
-    public var isUsingContinuousMode = false
     
     /// The name of the device. Needed for en/de-crypting messages
     public var deviceName: String? = nil
@@ -291,7 +296,17 @@ public struct DanaKitPumpManagerState: RawRepresentable, Equatable {
         }
     }
     
+    /// Special feature against red loops / ios suspending the app
     public var useSilentTones: Bool = false
+    
+    /// Another special feature against red loops / ios suspending the app
+    public var isUsingContinuousMode = false
+    
+    /// Allows the user to skip bolus syncing to prevent possible double Bolus entries
+    public var isBolusSyncDisabled: Bool = false
+    
+    /// Allows DanaKit to automaticly sync the time every evening
+    public var allowAutomaticTimeSync: Bool = true
     
     func shouldShowTimeWarning() -> Bool {
         guard let pumpTime = self.pumpTime, let syncedAt = self.pumpTimeSyncedAt else {
@@ -400,21 +415,27 @@ public struct DanaKitPumpManagerState: RawRepresentable, Equatable {
 extension DanaKitPumpManagerState: CustomDebugStringConvertible {
     public var debugDescription: String {
         return [
-            "## DanaKitPumpManagerState",
+            "## DanaKitPumpManagerState - \(Date.now)",
             "* isOnboarded: \(isOnBoarded)",
-            "* isConnected: \(isConnected)",
-            "* deviceName: \(String(describing: deviceName))",
-            "* bleIdentifier: \(String(describing: bleIdentifier))",
+            "* deviceName: \(deviceName ?? "<EMPTY>")",
+            "* bleIdentifier: \(bleIdentifier ?? "<EMPTY>")",
             "* friendlyDeviceName: \(getFriendlyDeviceName())",
-            "* insulinType: \(String(describing: insulinType))",
-            "* reservoirLevel: \(reservoirLevel)",
-            "* bolusState: \(bolusState.rawValue)",
-            "* basalDeliveryDate: \(basalDeliveryDate)",
-            "* basalDeliveryOrdinal: \(basalDeliveryOrdinal)",
             "* hwModel: \(hwModel)",
             "* pumpProtocol: \(pumpProtocol)",
+            "* lastStatusDate: \(lastStatusDate)",
+            "* pumpTime: \(pumpTime ?? Date.distantPast)",
+            "* insulinType: \(insulinType ?? .none)",
+            "* reservoirLevel: \(reservoirLevel)",
+            "* bolusState: \(bolusState.rawValue)",
+            "* basalDeliveryOrdinal: \(basalDeliveryOrdinal)",
+            "* basalProfileNumber: \(basalProfileNumber)",
             "* isInFetchHistoryMode: \(isInFetchHistoryMode)",
-            "* ignorePassword: \(ignorePassword)"
+            "* isUsingContinuousMode: \(isUsingContinuousMode)",
+            "* useSilentTones: \(useSilentTones)",
+            "* isBolusSyncDisabled: \(isBolusSyncDisabled)",
+            "* allowAutomaticTimeSync: \(allowAutomaticTimeSync)",
+            "* reservoirDate: \(reservoirDate ?? Date.distantPast)",
+            "* cannulaDate: \(cannulaDate ?? Date.distantPast)"
         ].joined(separator: "\n")
     }
 }
